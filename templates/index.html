@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roboflow Object Detection with WebRTC</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            margin: 20px 0;
+            background-color: #000;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        #video {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .status {
+            text-align: center;
+            margin-top: 10px;
+            font-size: 14px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Roboflow Object Detection</h1>
+        
+        <div class="video-container">
+            <video id="video" autoplay playsinline></video>
+        </div>
+        
+        <div class="controls">
+            <button id="startButton">Start Camera</button>
+            <button id="stopButton" disabled>Stop Camera</button>
+        </div>
+        
+        <div class="status" id="statusMessage">Ready</div>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('video');
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const statusMessage = document.getElementById('statusMessage');
+        
+        let peerConnection = null;
+        let localStream = null;
+        
+        function updateStatus(message) {
+            statusMessage.textContent = message;
+        }
+        
+        async function startCamera() {
+            try {
+                startButton.disabled = true;
+                updateStatus('Starting camera...');
+                
+                // Get user media (camera)
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        width: { ideal: 640 },
+                        height: { ideal: 480 }
+                    }, 
+                    audio: false 
+                });
+                
+                // Create peer connection
+                const config = {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' }
+                    ]
+                };
+                
+                peerConnection = new RTCPeerConnection(config);
+                
+                // Add tracks to the peer connection
+                localStream.getTracks().forEach(track => {
+                    peerConnection.addTrack(track, localStream);
+                });
+                
+                // Handle ICE candidates
+                peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        fetch('/ice', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                type: 'ice',
+                                candidate: event.candidate
+                            })
+                        });
+                    }
+                };
+                
+                // Handle incoming tracks
+                peerConnection.ontrack = (event) => {
+                    if (event.track.kind === 'video') {
+                        videoElement.srcObject = new MediaStream([event.track]);
+                    }
+                };
+                
+                // Create offer
+                updateStatus('Creating connection...');
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                
+                // Send offer to server
+                const response = await fetch('/offer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sdp: {
+                            type: peerConnection.localDescription.type,
+                            sdp: peerConnection.localDescription.sdp
+                        }
+                    })
+                });
+                
+                // Parse answer
+                const answerData = await response.json();
+                const answer = new RTCSessionDescription({
+                    type: answerData.sdp.type,
+                    sdp: answerData.sdp.sdp
+                });
+                
+                // Set remote description
+                await peerConnection.setRemoteDescription(answer);
+                updateStatus('Connected - Detecting objects');
+                
+                // Enable stop button
+                stopButton.disabled = false;
+                
+            } catch (error) {
+                console.error('Error starting camera:', error);
+                updateStatus('Error: ' + error.message);
+                startButton.disabled = false;
+                
+                // Clean up
+                if (localStream) {
+                    localStream.getTracks().forEach(track => track.stop());
+                    localStream = null;
+                }
+                
+                if (peerConnection) {
+                    peerConnection.close();
+                    peerConnection = null;
+                }
+            }
+        }
+        
+        async function stopCamera() {
+            // Stop tracks
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+            
+            // Close peer connection
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            
+            // Clear video
+            videoElement.srcObject = null;
+            
+            // Notify server
+            await fetch('/stop', { method: 'POST' });
+            
+            // Reset UI
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            updateStatus('Ready');
+        }
+        
+        // Event listeners
+        startButton.addEventListener('click', startCamera);
+        stopButton.addEventListener('click', stopCamera);
+        
+        // Clean up on page unload
+        window.addEventListener('beforeunload', () => {
+            if (peerConnection) {
+                fetch('/stop', { method: 'POST' });
+            }
+        });
+    </script>
+</body>
+</html>
